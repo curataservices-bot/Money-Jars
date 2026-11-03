@@ -699,7 +699,7 @@ dialog#sheet::backdrop { background: rgba(22,19,30,.5); }
   'use strict';
   const C = window.Core;
   const B = C.BUCKETS, BI = C.BUCKET_INFO, TI = C.TYPE_INFO;
-  const KEY = 'moneyJars.v1', META_KEY = 'moneyJars.meta';
+  const KEY = 'moneyJars.v1', META_KEY = 'moneyJars.meta', UNDO_KEY = 'moneyJars.beforeReset';
   // Google OAuth client ID for "Sign in with Google" Drive backup. Not a secret.
   const BUILT_IN_CLIENT_ID = '';
   const S = { state: null, kidId: null, view: 'home', unlockedUntil: 0, histKid: 'all' };
@@ -1037,7 +1037,8 @@ dialog#sheet::backdrop { background: rgba(22,19,30,.5); }
         <div class="btn-row">
           <button class="btn" data-action="recalc">🔄 Recalculate interest and birthday bonuses</button>
           <button class="btn" data-action="theme">🌓 Switch light or dark</button>
-          <button class="btn danger" data-action="erase">Erase everything on this device</button>
+          ${undoInfo() ? '<button class="btn" data-action="undo-reset">↩️ Undo the last fresh start</button>' : ''}
+          <button class="btn danger" data-action="start-fresh">🧹 Start fresh</button>
         </div></div>`;
   }
 
@@ -1058,6 +1059,42 @@ dialog#sheet::backdrop { background: rgba(22,19,30,.5); }
       <details class="help"><summary class="small">Advanced</summary>
         <label class="f small" style="margin-top:8px">Google OAuth client ID<input id="driveClientId" value="${esc(s.driveClientId || '')}" placeholder="${esc(BUILT_IN_CLIENT_ID || '1234-abc.apps.googleusercontent.com')}"></label>
       </details></fieldset>`;
+  }
+
+  // ---------- start fresh ----------
+  function undoInfo() {
+    try { const raw = localStorage.getItem(UNDO_KEY); return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
+  }
+  function startFreshSheet() {
+    const kids = st().kids;
+    openSheet('🧹 Start fresh', `
+      <form class="stack">
+        <div class="stack" role="radiogroup" aria-label="What to clear">
+          <label class="check"><input type="radio" name="mode" value="entries" checked><span>Clear all money<br><span class="muted small">Every jar goes back to $0. Kids and settings stay.</span></span></label>
+          ${kids.length ? `<label class="check"><input type="radio" name="mode" value="kid"><span>Clear one kid's money<br><span class="muted small">Only that kid's jars go back to $0.</span></span></label>
+          <select name="kid" aria-label="Which kid" hidden>${kids.map((k) => `<option value="${k.id}">${esc(k.emoji + ' ' + k.name)}</option>`).join('')}</select>` : ''}
+          <label class="check"><input type="radio" name="mode" value="all"><span>Erase everything<br><span class="muted small">Kids, money and settings. Like a brand-new app.</span></span></label>
+        </div>
+        <p class="msg warn" style="margin:0">This only changes this device. Your Google Drive backup stays until the next backup runs.</p>
+        <button type="button" class="btn" data-action="backup-download">⬇️ Download a backup first</button>
+        <label class="check"><input type="checkbox" name="sure"> I understand. I can undo this from Settings, Tools until the next fresh start.</label>
+        <div class="msgs"></div>
+        <button class="btn danger block">Start fresh</button>
+      </form>`, (form) => {
+      form.addEventListener('change', () => { if (form.kid) form.kid.hidden = form.mode.value !== 'kid'; if (form.sure.checked) $('.msgs', form).innerHTML = ''; });
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        if (!form.sure.checked) { $('.msgs', form).innerHTML = '<div class="msg err">Tick the box to confirm.</div>'; return; }
+        const mode = form.mode.value;
+        try { localStorage.setItem(UNDO_KEY, JSON.stringify({ at: new Date().toISOString(), mode, state: st() })); } catch (err) { /* ignore */ }
+        if (mode === 'all') { S.state = C.defaultState(); S.kidId = null; S.view = 'home'; }
+        else if (mode === 'kid') { const id = form.kid.value; st().txns = st().txns.filter((t) => t.kidId !== id); S.kidId = id; S.view = 'home'; }
+        else { st().txns = []; S.view = 'home'; }
+        if (mode !== 'all') st().kids.forEach((k) => { if (mode === 'entries' || k.id === form.kid.value) k.startDate = C.todayStr(); });
+        persist(); closeSheet(); render();
+        toast('Fresh start ✓ Undo is in Settings, Tools.');
+      });
+    });
   }
 
   function saveSettings(form) {
@@ -1577,10 +1614,16 @@ dialog#sheet::backdrop { background: rgba(22,19,30,.5); }
         try { localStorage.setItem('moneyJars.theme', root.dataset.theme); } catch (err) { /* ignore */ }
         break;
       }
-      case 'erase':
-        if (prompt('Type ERASE to delete all Money Jars data on this device.') === 'ERASE') {
-          S.state = C.defaultState(); S.kidId = null; persist(); render(); toast('Erased');
-        }
+      case 'start-fresh': parentOnly(startFreshSheet); break;
+      case 'undo-reset':
+        parentOnly(() => {
+          const u = undoInfo();
+          if (!u) return;
+          if (!confirm('Put back everything from before the fresh start on ' + new Date(u.at).toLocaleString() + '? Changes made since then will be replaced.')) return;
+          S.state = C.normalizeState(u.state); S.kidId = S.state.kids[0] ? S.state.kids[0].id : null;
+          try { localStorage.removeItem(UNDO_KEY); } catch (err) { /* ignore */ }
+          persist(); render(); toast('Restored ✓');
+        });
         break;
     }
   });
