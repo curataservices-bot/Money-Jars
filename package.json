@@ -1,0 +1,11 @@
+{
+  "name": "money-jars",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Kids' money tracker: Spend, Save, Invest and Gift jars with parent matching.",
+  "scripts": {
+    "test": "node --test tests/core.test.js",
+    "build": "node scripts/build-standalone.js",
+    "start": "python3 -m http.server 8080"
+  }
+}
