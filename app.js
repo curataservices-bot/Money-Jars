@@ -613,22 +613,40 @@
 
   function adjustSheet() {
     const k = kid();
+    const bal = C.balances(st(), k.id);
     openSheet('✏️ Correction', `
       <form class="stack">
-        <p class="muted" style="margin:0">Use this to fix a mistake or to enter starting balances. Use a minus sign to take money away.</p>
+        <p class="muted" style="margin:0">Fix a mistake or enter a starting balance.</p>
+        <div class="seg" role="radiogroup" aria-label="Add or take away">
+          <label><input type="radio" name="dir" value="1" checked>➕ Deposit</label>
+          <label><input type="radio" name="dir" value="-1">➖ Withdraw</label>
+        </div>
         <div class="grid2">
           <label class="f">Jar<select name="bucket">${B.map((b) => `<option value="${b}">${BI[b].emoji} ${BI[b].label}</option>`).join('')}</select></label>
           <label class="f">Whose money<select name="owner"><option value="kid">${esc(k.name)}'s</option><option value="parent">${esc(pName())} bonus</option></select></label>
         </div>
-        <label class="f">Amount<input name="amount" class="money" inputmode="decimal" placeholder="$0.00" required></label>
+        <label class="f">Amount<input name="amount" class="money" inputmode="decimal" placeholder="$0.00" autocomplete="off" required></label>
+        <div class="preview"></div>
         <label class="f">Reason<input name="note" placeholder="Starting balance" required></label>
         <label class="f">Date<input type="date" name="date" value="${C.todayStr()}"></label>
         <div class="msgs"></div><div class="ovr"></div>
         <button class="btn primary block">Save correction</button>
       </form>`, (form) => {
+      const params = () => {
+        const amt = Math.abs(C.toCents(form.amount.value));
+        return { kidId: k.id, bucket: form.bucket.value, owner: form.owner.value, amount: amt * Number(form.dir.value), note: form.note.value, date: form.date.value };
+      };
+      const update = () => {
+        const p = params();
+        const now = bal[p.bucket][p.owner];
+        $('.preview', form).innerHTML = p.amount
+          ? `<div class="msg ${now + p.amount < 0 ? 'warn' : 'ok'}">${BI[p.bucket].emoji} ${BI[p.bucket].label}, ${p.owner === 'kid' ? esc(k.name) + "'s money" : esc(pName()) + ' bonus'}: ${fmt(now)} → <b>${fmt(now + p.amount)}</b></div>`
+          : '';
+      };
+      form.addEventListener('input', (e) => { if (e.target.name !== 'override') update(); });
       form.addEventListener('submit', (e) => {
         e.preventDefault();
-        const r = C.buildAdjust(st(), { kidId: k.id, bucket: form.bucket.value, owner: form.owner.value, amount: C.toCents(form.amount.value), note: form.note.value, date: form.date.value });
+        const r = C.buildAdjust(st(), params());
         $('.msgs', form).innerHTML = msgsHtml(r);
         if (r.errors.length) return;
         if (r.warnings.length && !(form.override && form.override.checked)) { $('.ovr', form).innerHTML = overrideBox(r); return; }

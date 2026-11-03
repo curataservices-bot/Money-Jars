@@ -331,7 +331,7 @@
     const txn = baseTxn(p, 'adjust');
     if (BUCKETS.indexOf(p.bucket) === -1) errors.push('Pick a jar.');
     if (p.owner !== 'kid' && p.owner !== 'parent') errors.push('Pick whose money it is.');
-    if (!p.amount || isNaN(p.amount)) errors.push('Enter a non-zero amount. Use a minus sign to take money away.');
+    if (!p.amount || isNaN(p.amount)) errors.push('Enter an amount greater than zero.');
     if (!txn.note) errors.push('Add a note explaining the correction.');
     if (errors.length) return { txn, errors, warnings };
     const bal = balances(state, p.kidId)[p.bucket][p.owner];
