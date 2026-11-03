@@ -4,6 +4,8 @@
   const C = window.Core;
   const B = C.BUCKETS, BI = C.BUCKET_INFO, TI = C.TYPE_INFO;
   const KEY = 'moneyJars.v1', META_KEY = 'moneyJars.meta';
+  // Google OAuth client ID for "Sign in with Google" Drive backup. Not a secret.
+  const BUILT_IN_CLIENT_ID = '';
   const S = { state: null, kidId: null, view: 'home', unlockedUntil: 0, histKid: 'all' };
   let meta = { lastBackupAt: null, driveFileId: null };
 
@@ -124,6 +126,10 @@
 
   function backupBanner() {
     if (!st().txns.length) return '';
+    const unsaved = !meta.lastBackupAt || (st().savedAt && st().savedAt > meta.lastBackupAt);
+    if (meta.driveLinked && Drive.clientId() && !Drive.connected() && unsaved) {
+      return `<div class="banner"><span>☁️ New changes are not in Google Drive yet.</span><button class="btn" data-action="drive-signin">Back up to Drive</button></div>`;
+    }
     const last = meta.lastBackupAt ? new Date(meta.lastBackupAt) : null;
     const days = last ? Math.floor((Date.now() - last) / 86400000) : null;
     if (last && days < 7) return '';
@@ -330,20 +336,32 @@
           ${navigator.canShare ? '<button class="btn" data-action="backup-share">📤 Share to Drive or Files</button>' : ''}
           <button class="btn" data-action="restore-file">⬆️ Restore from file</button>
         </div>
-        <fieldset class="stack"><legend>Google Drive, one tap</legend>
-          <p class="muted small" style="margin:0">Needs a free Google client ID. See the setup steps in the README.</p>
-          <label class="f">Google OAuth client ID<input id="driveClientId" value="${esc(s.driveClientId || '')}" placeholder="1234-abc.apps.googleusercontent.com"></label>
-          <label class="check"><input type="checkbox" id="driveAuto" ${s.driveAuto ? 'checked' : ''}> Back up to Drive after every change while signed in</label>
-          <div class="btn-row">
-            <button class="btn" data-action="drive-save">☁️ Back up to Drive now</button>
-            <button class="btn" data-action="drive-restore">Restore from Drive</button>
-          </div></fieldset></div>
+        ${driveSection(s)}</div>
       <div class="card stack"><h2>Tools</h2>
         <div class="btn-row">
           <button class="btn" data-action="recalc">🔄 Recalculate interest and birthday bonuses</button>
           <button class="btn" data-action="theme">🌓 Switch light or dark</button>
           <button class="btn danger" data-action="erase">Erase everything on this device</button>
         </div></div>`;
+  }
+
+  function driveSection(s) {
+    const cid = Drive.clientId();
+    const on = Drive.connected();
+    const status = !cid ? '⚙️ Google sign-in is not set up yet. See the README.'
+      : on ? '✅ Connected to Google Drive.'
+      : meta.driveLinked ? '🔌 Linked before. Tap Sign in with Google to reconnect.' : 'Not connected yet.';
+    return `<fieldset class="stack"><legend>Google Drive</legend>
+      <p class="small" style="margin:0;font-weight:700">${status}</p>
+      ${cid ? `<div class="btn-row">
+        ${on ? '<button class="btn primary" data-action="drive-save">☁️ Back up now</button>'
+          : '<button class="btn primary" data-action="drive-signin">Sign in with Google</button>'}
+        <button class="btn" data-action="drive-restore">Restore from Drive</button></div>
+      <label class="check"><input type="checkbox" id="driveAuto" ${s.driveAuto ? 'checked' : ''}> Back up after every change</label>
+      <p class="muted small" style="margin:0">Saves to a file called money-jars-backup.json in your Drive. Google keeps older versions of it.</p>` : ''}
+      <details class="help"><summary class="small">Advanced</summary>
+        <label class="f small" style="margin-top:8px">Google OAuth client ID<input id="driveClientId" value="${esc(s.driveClientId || '')}" placeholder="${esc(BUILT_IN_CLIENT_ID || '1234-abc.apps.googleusercontent.com')}"></label>
+      </details></fieldset>`;
   }
 
   function saveSettings(form) {
@@ -719,7 +737,15 @@
   // Google Drive backup using Google Identity Services and the drive.file scope.
   const Drive = {
     token: null, exp: 0, timer: null,
-    clientId() { const el = $('#driveClientId'); const v = el ? el.value.trim() : ''; if (el && v !== (st().settings.driveClientId || '')) { st().settings.driveClientId = v; persist(); } return v || st().settings.driveClientId; },
+    clientId() { return (st().settings.driveClientId || '').trim() || BUILT_IN_CLIENT_ID; },
+    connected() { return !!this.token && Date.now() < this.exp - 60000; },
+    async signIn() {
+      await this.getToken();
+      meta.driveLinked = true; saveMeta();
+      if (!st().settings.driveAuto) { st().settings.driveAuto = true; persist(); }
+      await this.save(true);
+      render(); toast('Connected to Google Drive and backed up ✓');
+    },
     loadGis() {
       return new Promise((res, rej) => {
         if (window.google && google.accounts && google.accounts.oauth2) return res();
@@ -773,7 +799,7 @@
         const r = await this.api('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', { method: 'POST', headers: { 'Content-Type': 'multipart/related; boundary=' + boundary }, body: multipart });
         id = (await r.json()).id;
       }
-      meta.driveFileId = id; markBackedUp();
+      meta.driveFileId = id; meta.driveLinked = true; markBackedUp();
       if (!quiet) { render(); toast('Backed up to Google Drive ✓'); }
     },
     async restore() {
@@ -792,7 +818,7 @@
   };
 
   async function backupNow() {
-    if (st().settings.driveClientId) {
+    if (Drive.clientId()) {
       try { await Drive.save(); } catch (e) { toast(e.message); }
     } else shareBackup();
   }
@@ -841,6 +867,7 @@
       case 'backup-share': shareBackup(); break;
       case 'restore-file': parentOnly(pickFile); break;
       case 'drive-save': Drive.save().catch((err) => toast(err.message)); break;
+      case 'drive-signin': Drive.signIn().catch((err) => toast(err.message)); break;
       case 'drive-restore': Drive.restore().catch((err) => toast(err.message)); break;
       case 'recalc':
         if (confirm('Remove all automatic interest and birthday bonus entries and work them out again with the current rules?')) {
@@ -867,7 +894,7 @@
   document.addEventListener('change', (e) => {
     if (e.target.matches('[data-action="hist-kid"]')) { S.histKid = e.target.value; render(); }
     if (e.target.id === 'driveAuto') { st().settings.driveAuto = e.target.checked; persist(); }
-    if (e.target.id === 'driveClientId') { st().settings.driveClientId = e.target.value.trim(); persist(); }
+    if (e.target.id === 'driveClientId') { st().settings.driveClientId = e.target.value.trim(); Drive.token = null; persist(); render(); }
   });
   document.addEventListener('submit', (e) => {
     if (e.target.id === 'settingsForm') { e.preventDefault(); saveSettings(e.target); }

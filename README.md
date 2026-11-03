@@ -51,15 +51,17 @@ Settings, then Backup:
 - **Restore from file** replaces the data on this device with a backup.
 - **Google Drive, one tap** uploads to a `money-jars-backup.json` file in your Drive. It can also back up after every change. Drive keeps older versions of the file automatically.
 
-### Google Drive one-tap setup (about 10 minutes, once)
+### Google sign-in setup (once, by the app owner)
+
+Google requires every app that uses Drive to be registered. This is done once. After that, every device just taps **Sign in with Google**.
 
 1. Go to https://console.cloud.google.com and create a project called Money Jars.
-2. In APIs & Services, Library, enable **Google Drive API**.
-3. In OAuth consent screen, choose External, fill in the app name and your email, and add your Google account as a test user.
-4. In Credentials, create an **OAuth client ID** of type Web application. Under Authorized JavaScript origins, add your GitHub Pages address, for example `https://YOURNAME.github.io`.
-5. Copy the client ID into Money Jars Settings, then tap **Back up to Drive now**.
+2. Enable the **Google Drive API** for that project.
+3. Set up the consent screen. Choose External, add yourself as a test user, then publish the app to Production.
+4. Create an **OAuth client ID** of type Web application. Add `https://curataservices-bot.github.io` as an Authorized JavaScript origin.
+5. Put the client ID in `BUILT_IN_CLIENT_ID` at the top of `app.js`. You can also paste it under Settings, Backup, Advanced on one device.
 
-The app only asks for the `drive.file` permission, so it can see only the files it created.
+The app only asks for the `drive.file` permission, so it can see only the files it created. Each sign-in lasts about an hour. After that, a banner offers a one-tap reconnect when there are new changes.
 
 ## Development
 
