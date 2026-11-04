@@ -5,7 +5,7 @@
   const B = C.BUCKETS, BI = C.BUCKET_INFO, TI = C.TYPE_INFO;
   const KEY = 'moneyJars.v1', META_KEY = 'moneyJars.meta', UNDO_KEY = 'moneyJars.beforeReset';
   // Google OAuth client ID for "Sign in with Google" Drive backup. Not a secret.
-  const BUILT_IN_CLIENT_ID = '';
+  const BUILT_IN_CLIENT_ID = '1008041625978-t9bi8k8pl7vqqs3g93kiujloo7l90s1d.apps.googleusercontent.com';
   const S = { state: null, kidId: null, view: 'home', unlockedUntil: 0, histKid: 'all' };
   let meta = { lastBackupAt: null, driveFileId: null };
 
