@@ -481,7 +481,81 @@
     return rows.map((r) => r.map(csvCell).join(',')).join('\n');
   }
 
+  // ---------- bank-style statements ----------
+  // One account (jar) for one kid between two dates (inclusive), like a bank statement.
+  function statementRows(state, kidId, bucket, from, to) {
+    const s = state.settings;
+    let opening = 0, openKid = 0, openPar = 0;
+    const rows = [];
+    const totals = { withdrawal: 0, deposit: 0, bonus: 0 };
+    let bal = 0, kidBal = 0, parBal = 0;
+    sortedTxns(state).forEach((t) => {
+      if (t.kidId !== kidId) return;
+      if (to && t.date > to) return;
+      let k = 0, p = 0;
+      t.lines.forEach((l) => { if (l.bucket === bucket) { if (l.owner === 'kid') k += l.amount; else p += l.amount; } });
+      if (!k && !p) return;
+      if (from && t.date < from) { opening += k + p; openKid += k; openPar += p; return; }
+      const r = { date: t.date, description: '', withdrawal: 0, deposit: 0, bonus: 0, type: t.type };
+      const note = t.note || '';
+      const info = (TYPE_INFO[t.type] || {}).label || t.type;
+      const tot = k + p;
+      if (t.type === 'gift-in' || t.type === 'earned-in') {
+        r.description = (t.type === 'gift-in' ? 'Gift' : 'Earned') + (note ? ': ' + note : '');
+        if (k > 0) r.deposit = k; else if (k < 0) r.withdrawal = -k;
+        if (p > 0) r.bonus = p;
+      } else if (t.type === 'interest') {
+        r.description = 'Interest, ' + s.saveAPR + '% a year';
+        r.bonus = p;
+      } else if (t.type === 'bonus') {
+        r.description = 'Birthday saver bonus';
+        r.bonus = p;
+      } else if (t.type === 'transfer') {
+        const other = BUCKET_INFO[bucket === t.from ? t.to : t.from].label;
+        const extra = note && !/^Moved /.test(note) ? ': ' + note : '';
+        if (tot < 0) { r.description = 'Moved to ' + other + extra; r.withdrawal = -tot; }
+        else { r.description = 'Moved from ' + other + extra; r.deposit = tot; }
+      } else if (t.type === 'growth') {
+        r.description = tot >= 0 ? 'Investment gain' : 'Investment loss';
+        if (tot >= 0) r.deposit = tot; else r.withdrawal = -tot;
+      } else if (t.type === 'adjust') {
+        r.description = 'Correction' + (note ? ': ' + note : '');
+        if (tot < 0) r.withdrawal = -tot; else if (p > 0) r.bonus = p; else r.deposit = k;
+      } else {
+        r.description = (note || info) + (t.category ? ' (' + t.category + ')' : '');
+        if (tot < 0) r.withdrawal = -tot; else r.deposit = tot;
+      }
+      rows.push(r);
+      totals.withdrawal += r.withdrawal; totals.deposit += r.deposit; totals.bonus += r.bonus;
+      kidBal += k; parBal += p;
+    });
+    bal = opening;
+    rows.forEach((r) => { bal += r.deposit + r.bonus - r.withdrawal; r.balance = bal; });
+    return {
+      bucket, opening, closing: bal, rows, totals,
+      closingKid: openKid + kidBal, closingParent: openPar + parBal,
+    };
+  }
+
+  function statementCSV(state, opts) {
+    opts = opts || {};
+    const kids = state.kids.filter((k) => !opts.kidId || opts.kidId === 'all' || k.id === opts.kidId);
+    const money = (c) => (c ? (c / 100).toFixed(2) : '');
+    const rows = [['Kid', 'Account', 'Date', 'Description', 'Withdrawal', 'Deposit', 'Parent bonus', 'Balance']];
+    kids.forEach((kid) => {
+      BUCKETS.forEach((b) => {
+        const st = statementRows(state, kid.id, b, opts.from, opts.to);
+        const acct = BUCKET_INFO[b].label;
+        rows.push([kid.name, acct, opts.from || '', 'Opening balance', '', '', '', (st.opening / 100).toFixed(2)]);
+        st.rows.forEach((r) => rows.push([kid.name, acct, r.date, r.description, money(r.withdrawal), money(r.deposit), money(r.bonus), (r.balance / 100).toFixed(2)]));
+        rows.push([kid.name, acct, opts.to || '', 'Closing balance', money(st.totals.withdrawal), money(st.totals.deposit), money(st.totals.bonus), (st.closing / 100).toFixed(2)]);
+      });
+    });
+    return rows.map((r) => r.map(csvCell).join(',')).join('\r\n');
+  }
+
   return {
+    statementRows, statementCSV,
     BUCKETS, BUCKET_INFO, TYPE_INFO, AUTO_TYPES,
     defaultState, defaultSettings, newId, todayStr, dateStr, daysBetween,
     toCents, fmt, allocate, splitTotal, proRata, balances, sortedTxns,

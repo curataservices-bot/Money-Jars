@@ -57,6 +57,16 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => t.classList.remove('show'), 3200);
   }
+  // On phones, open the share sheet (Save to Files, Drive, email). Elsewhere, download.
+  async function deliver(name, data, type) {
+    const file = new File([data], name, { type });
+    const phone = matchMedia('(pointer: coarse)').matches;
+    if (phone && navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file], title: name }); return; }
+      catch (e) { if (e.name === 'AbortError') return; }
+    }
+    download(name, data, type);
+  }
   function download(name, text, type) {
     const blob = new Blob([text], { type });
     const a = document.createElement('a');
@@ -275,7 +285,7 @@
           <option value="all"${sel === 'all' ? ' selected' : ''}>Everyone</option>
           ${kids.map((k) => `<option value="${k.id}"${sel === k.id ? ' selected' : ''}>${esc(k.emoji + ' ' + k.name)}</option>`).join('')}
         </select>
-        <button class="btn" data-action="export-csv">⬇️ Export to spreadsheet</button></div></div>
+        <button class="btn primary" data-action="statements">📄 Statements</button></div></div>
       <div class="card"><h2>Totals</h2><div class="scroll-x"><table class="t">
         <thead><tr><th>What</th><th class="r">Kid money</th><th class="r">${esc(pName())}</th><th class="r">Total</th></tr></thead>
         <tbody>${body || '<tr><td colspan="4" class="muted">No entries yet.</td></tr>'}</tbody>
@@ -304,7 +314,10 @@
           <p class="muted small" style="margin:0">Percent added once when money goes in. 100 means $1 for every $1.</p>
           <div class="grid4">${B.map((b) => `<label class="f">${BI[b].emoji} ${BI[b].label} %${num('match_' + b, s.match[b], 'min="0"')}</label>`).join('')}</div>
           <label class="check"><input type="checkbox" name="matchEarned" ${s.matchEarned ? 'checked' : ''}> Match earned money too, not just gifts</label>
-          <label class="f">What kids call you${'<input name="parentName" value="' + esc(s.parentName) + '">'}</label></div>
+          <div class="grid2">
+            <label class="f">What kids call you<input name="parentName" value="${esc(s.parentName)}"></label>
+            <label class="f">Bank name on statements<input name="bankName" value="${esc(s.bankName || '')}" placeholder="Bank of ${esc(s.parentName || 'Mom & Dad')}"></label>
+          </div></div>
         <div class="card stack"><h2>🐷 Save rules</h2>
           <div class="grid2">
             <label class="f">Yearly interest %${num('saveAPR', s.saveAPR, 'min="0"')}</label>
@@ -365,6 +378,53 @@
       </details></fieldset>`;
   }
 
+  // ---------- statements ----------
+  function periodRange(key) {
+    const t = C.todayStr();
+    const [y, m] = t.split('-').map(Number);
+    const p2 = (n) => String(n).padStart(2, '0');
+    const last = (yy, mm) => yy + '-' + p2(mm) + '-' + p2(new Date(yy, mm, 0).getDate());
+    if (key === 'this-month') return { from: y + '-' + p2(m) + '-01', to: t };
+    if (key === 'last-month') { const ly = m === 1 ? y - 1 : y, lm = m === 1 ? 12 : m - 1; return { from: ly + '-' + p2(lm) + '-01', to: last(ly, lm) }; }
+    if (key === 'this-year') return { from: y + '-01-01', to: t };
+    if (key === 'last-year') return { from: (y - 1) + '-01-01', to: (y - 1) + '-12-31' };
+    return { from: '', to: t };
+  }
+  function statementSheet() {
+    const kids = st().kids;
+    if (!kids.length) { toast('Add a kid first'); return; }
+    openSheet('📄 Statements', `
+      <form class="stack">
+        <p class="muted" style="margin:0">Bank-style statements with each jar as its own account: withdrawals, deposits, parent bonus and running balance.</p>
+        <label class="f">Who<select name="kid"><option value="all">Everyone</option>${kids.map((k) => `<option value="${k.id}"${k.id === S.histKid ? ' selected' : ''}>${esc(k.emoji + ' ' + k.name)}</option>`).join('')}</select></label>
+        <label class="f">Statement period<select name="period">
+          <option value="this-month">This month</option><option value="last-month">Last month</option>
+          <option value="this-year">This year</option><option value="last-year">Last year</option>
+          <option value="all" selected>All time</option><option value="custom">Custom dates</option></select></label>
+        <div class="grid2" id="customDates" hidden>
+          <label class="f">From<input type="date" name="from"></label>
+          <label class="f">To<input type="date" name="to" value="${C.todayStr()}"></label>
+        </div>
+        <div class="msgs"></div>
+        <button type="submit" class="btn primary block" value="xlsx">📗 Excel statement (.xlsx)</button>
+        <button type="submit" class="btn block" value="csv">CSV file</button>
+        <p class="muted small" style="margin:0">Excel files open in Excel, Google Sheets and Numbers. Use CSV to import into other tools.</p>
+      </form>`, (form) => {
+      form.addEventListener('change', () => { $('#customDates', form).hidden = form.period.value !== 'custom'; });
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const fmtType = (e.submitter && e.submitter.value) || 'xlsx';
+        const range = form.period.value === 'custom' ? { from: form.from.value, to: form.to.value || C.todayStr() } : periodRange(form.period.value);
+        if (range.from && range.to && range.from > range.to) { $('.msgs', form).innerHTML = '<div class="msg err">The From date is after the To date.</div>'; return; }
+        const opts = { kidId: form.kid.value, from: range.from, to: range.to };
+        const who = opts.kidId === 'all' ? 'All kids' : (kids.find((k) => k.id === opts.kidId) || {}).name;
+        const base = 'Money Jars statement - ' + who + ' - ' + (range.from ? range.from + ' to ' : 'through ') + range.to;
+        if (fmtType === 'csv') deliver(base + '.csv', C.statementCSV(st(), opts), 'text/csv');
+        else deliver(base + '.xlsx', window.Statement.workbook(st(), opts), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      });
+    });
+  }
+
   // ---------- start fresh ----------
   function undoInfo() {
     try { const raw = localStorage.getItem(UNDO_KEY); return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
@@ -414,7 +474,7 @@
     if (ms.some((x) => !(x > 0))) errs.push('Milestones must be positive numbers.');
     if (errs.length) { $('.msgs', form).innerHTML = errs.map((e) => `<div class="msg err">${esc(e)}</div>`).join(''); return; }
     Object.assign(s, {
-      giftSplit: split, match, matchEarned: f.matchEarned.checked, parentName: f.parentName.value.trim() || 'Mom & Dad',
+      giftSplit: split, match, matchEarned: f.matchEarned.checked, parentName: f.parentName.value.trim() || 'Mom & Dad', bankName: f.bankName.value.trim(),
       saveAPR: n('saveAPR'), saveMaxWithdrawPct: n('saveMaxWithdrawPct'), saveWindow: f.saveWindow.value,
       saveWithdrawalsPerWindow: Math.max(1, Math.round(n('saveWithdrawalsPerWindow'))),
       saveMilestones: ms.sort((a, b) => a - b), autoInterest: f.autoInterest.checked,
@@ -898,7 +958,7 @@
           persist(); closeSheet(); render(); toast('Entry deleted');
         });
         break;
-      case 'export-csv': download('money-jars-' + C.todayStr() + '.csv', C.toCSV(st()), 'text/csv'); break;
+      case 'statements': statementSheet(); break;
       case 'backup-now': backupNow(); break;
       case 'backup-download': download(backupName(), backupJSON(), 'application/json'); markBackedUp(); render(); toast('Backup downloaded ✓'); break;
       case 'backup-share': shareBackup(); break;

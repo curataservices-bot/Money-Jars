@@ -139,6 +139,8 @@ h1, h2, h3 { margin: 0; line-height: 1.2; }
 .btn-row { display: flex; flex-wrap: wrap; gap: 8px; }
 label.f { display: flex; flex-direction: column; gap: 4px; font-weight: 700; font-size: .9rem; }
 input, select, textarea { border: 1.5px solid var(--border); border-radius: 12px; padding: 10px 12px; background: var(--surface); min-width: 0; width: 100%; }
+/* 16px minimum stops iPhones from zooming in when a field is tapped */
+input, select, textarea { font-size: max(16px, 1em); }
 input:focus, select:focus, textarea:focus { outline: 3px solid color-mix(in srgb, var(--invest) 35%, transparent); border-color: var(--invest); }
 input.money { font-size: 1.6rem; font-weight: 800; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -682,7 +684,81 @@ dialog#sheet::backdrop { background: rgba(22,19,30,.5); }
     return rows.map((r) => r.map(csvCell).join(',')).join('\n');
   }
 
+  // ---------- bank-style statements ----------
+  // One account (jar) for one kid between two dates (inclusive), like a bank statement.
+  function statementRows(state, kidId, bucket, from, to) {
+    const s = state.settings;
+    let opening = 0, openKid = 0, openPar = 0;
+    const rows = [];
+    const totals = { withdrawal: 0, deposit: 0, bonus: 0 };
+    let bal = 0, kidBal = 0, parBal = 0;
+    sortedTxns(state).forEach((t) => {
+      if (t.kidId !== kidId) return;
+      if (to && t.date > to) return;
+      let k = 0, p = 0;
+      t.lines.forEach((l) => { if (l.bucket === bucket) { if (l.owner === 'kid') k += l.amount; else p += l.amount; } });
+      if (!k && !p) return;
+      if (from && t.date < from) { opening += k + p; openKid += k; openPar += p; return; }
+      const r = { date: t.date, description: '', withdrawal: 0, deposit: 0, bonus: 0, type: t.type };
+      const note = t.note || '';
+      const info = (TYPE_INFO[t.type] || {}).label || t.type;
+      const tot = k + p;
+      if (t.type === 'gift-in' || t.type === 'earned-in') {
+        r.description = (t.type === 'gift-in' ? 'Gift' : 'Earned') + (note ? ': ' + note : '');
+        if (k > 0) r.deposit = k; else if (k < 0) r.withdrawal = -k;
+        if (p > 0) r.bonus = p;
+      } else if (t.type === 'interest') {
+        r.description = 'Interest, ' + s.saveAPR + '% a year';
+        r.bonus = p;
+      } else if (t.type === 'bonus') {
+        r.description = 'Birthday saver bonus';
+        r.bonus = p;
+      } else if (t.type === 'transfer') {
+        const other = BUCKET_INFO[bucket === t.from ? t.to : t.from].label;
+        const extra = note && !/^Moved /.test(note) ? ': ' + note : '';
+        if (tot < 0) { r.description = 'Moved to ' + other + extra; r.withdrawal = -tot; }
+        else { r.description = 'Moved from ' + other + extra; r.deposit = tot; }
+      } else if (t.type === 'growth') {
+        r.description = tot >= 0 ? 'Investment gain' : 'Investment loss';
+        if (tot >= 0) r.deposit = tot; else r.withdrawal = -tot;
+      } else if (t.type === 'adjust') {
+        r.description = 'Correction' + (note ? ': ' + note : '');
+        if (tot < 0) r.withdrawal = -tot; else if (p > 0) r.bonus = p; else r.deposit = k;
+      } else {
+        r.description = (note || info) + (t.category ? ' (' + t.category + ')' : '');
+        if (tot < 0) r.withdrawal = -tot; else r.deposit = tot;
+      }
+      rows.push(r);
+      totals.withdrawal += r.withdrawal; totals.deposit += r.deposit; totals.bonus += r.bonus;
+      kidBal += k; parBal += p;
+    });
+    bal = opening;
+    rows.forEach((r) => { bal += r.deposit + r.bonus - r.withdrawal; r.balance = bal; });
+    return {
+      bucket, opening, closing: bal, rows, totals,
+      closingKid: openKid + kidBal, closingParent: openPar + parBal,
+    };
+  }
+
+  function statementCSV(state, opts) {
+    opts = opts || {};
+    const kids = state.kids.filter((k) => !opts.kidId || opts.kidId === 'all' || k.id === opts.kidId);
+    const money = (c) => (c ? (c / 100).toFixed(2) : '');
+    const rows = [['Kid', 'Account', 'Date', 'Description', 'Withdrawal', 'Deposit', 'Parent bonus', 'Balance']];
+    kids.forEach((kid) => {
+      BUCKETS.forEach((b) => {
+        const st = statementRows(state, kid.id, b, opts.from, opts.to);
+        const acct = BUCKET_INFO[b].label;
+        rows.push([kid.name, acct, opts.from || '', 'Opening balance', '', '', '', (st.opening / 100).toFixed(2)]);
+        st.rows.forEach((r) => rows.push([kid.name, acct, r.date, r.description, money(r.withdrawal), money(r.deposit), money(r.bonus), (r.balance / 100).toFixed(2)]));
+        rows.push([kid.name, acct, opts.to || '', 'Closing balance', money(st.totals.withdrawal), money(st.totals.deposit), money(st.totals.bonus), (st.closing / 100).toFixed(2)]);
+      });
+    });
+    return rows.map((r) => r.map(csvCell).join(',')).join('\r\n');
+  }
+
   return {
+    statementRows, statementCSV,
     BUCKETS, BUCKET_INFO, TYPE_INFO, AUTO_TYPES,
     defaultState, defaultSettings, newId, todayStr, dateStr, daysBetween,
     toCents, fmt, allocate, splitTotal, proRata, balances, sortedTxns,
@@ -691,6 +767,327 @@ dialog#sheet::backdrop { background: rgba(22,19,30,.5); }
     runAutoEntries, clearAutoEntries, birthdayPreview, bonusFor,
     normalizeState, toCSV,
   };
+});
+</script>
+<script>
+/*
+ * Tiny .xlsx writer: styled cells, merges, column widths, landscape printing.
+ * No dependencies. Works in the browser (window.XLSXLite) and in Node.
+ * Cell: { v: value, t: 's' | 'n' | 'd', s: styleName }  (t 'd' takes 'YYYY-MM-DD')
+ */
+(function (root, factory) {
+  const api = factory();
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  else root.XLSXLite = api;
+})(typeof self !== 'undefined' ? self : this, function () {
+  'use strict';
+
+  const STYLE = {
+    default: 0, title: 1, bold: 2, muted: 3, header: 4, date: 5, text: 6, money: 7, moneyBold: 8,
+    moneyOut: 9, moneyBonus: 10, spend: 11, save: 12, invest: 13, gift: 14, totalMoney: 15, totalLabel: 16,
+    headerRight: 17, label: 18, moneyBig: 19,
+  };
+
+  const STYLES_XML = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+    '<numFmts count="2"><numFmt numFmtId="164" formatCode="&quot;$&quot;#,##0.00;[Red]-&quot;$&quot;#,##0.00"/>' +
+    '<numFmt numFmtId="165" formatCode="mmm d, yyyy"/></numFmts>' +
+    '<fonts count="8">' +
+    '<font><sz val="11"/><name val="Calibri"/></font>' +
+    '<font><b/><sz val="11"/><name val="Calibri"/></font>' +
+    '<font><b/><sz val="15"/><color rgb="FF2B2440"/><name val="Calibri"/></font>' +
+    '<font><sz val="10"/><color rgb="FF6E6785"/><name val="Calibri"/></font>' +
+    '<font><b/><sz val="10"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>' +
+    '<font><sz val="11"/><color rgb="FFC0392B"/><name val="Calibri"/></font>' +
+    '<font><sz val="11"/><color rgb="FF1F7A50"/><name val="Calibri"/></font>' +
+    '<font><b/><sz val="13"/><name val="Calibri"/></font>' +
+    '</fonts>' +
+    '<fills count="7"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>' +
+    ['FF2B2440', 'FFF47A2A', 'FFE64A8F', 'FF1F9E66', 'FF7C4CE0'].map((c) => '<fill><patternFill patternType="solid"><fgColor rgb="' + c + '"/><bgColor indexed="64"/></patternFill></fill>').join('') +
+    '</fills>' +
+    '<borders count="3"><border><left/><right/><top/><bottom/><diagonal/></border>' +
+    '<border><left/><right/><top style="thin"><color rgb="FF2B2440"/></top><bottom style="double"><color rgb="FF2B2440"/></bottom><diagonal/></border>' +
+    '<border><left/><right/><top/><bottom style="hair"><color rgb="FFD9D2C5"/></bottom><diagonal/></border></borders>' +
+    '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+    '<cellXfs count="20">' +
+    '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' + // 0 default
+    '<xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>' + // 1 title
+    '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>' + // 2 bold
+    '<xf numFmtId="0" fontId="3" fillId="0" borderId="0" xfId="0" applyFont="1"/>' + // 3 muted
+    '<xf numFmtId="0" fontId="4" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"><alignment vertical="center"/></xf>' + // 4 header
+    '<xf numFmtId="165" fontId="0" fillId="0" borderId="2" xfId="0" applyNumberFormat="1" applyBorder="1"><alignment horizontal="left"/></xf>' + // 5 date
+    '<xf numFmtId="0" fontId="0" fillId="0" borderId="2" xfId="0" applyBorder="1"/>' + // 6 text
+    '<xf numFmtId="164" fontId="0" fillId="0" borderId="2" xfId="0" applyNumberFormat="1" applyBorder="1"/>' + // 7 money
+    '<xf numFmtId="164" fontId="1" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1"/>' + // 8 money bold
+    '<xf numFmtId="164" fontId="5" fillId="0" borderId="2" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1"/>' + // 9 money out
+    '<xf numFmtId="164" fontId="6" fillId="0" borderId="2" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1"/>' + // 10 money bonus
+    [3, 4, 5, 6].map((f) => '<xf numFmtId="0" fontId="4" fillId="' + f + '" borderId="0" xfId="0" applyFont="1" applyFill="1"><alignment vertical="center"/></xf>').join('') + // 11-14 accounts
+    '<xf numFmtId="164" fontId="1" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1"/>' + // 15 total money
+    '<xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1"/>' + // 16 total label
+    '<xf numFmtId="0" fontId="4" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"><alignment horizontal="right" vertical="center"/></xf>' + // 17 header right
+    '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' + // 18 label
+    '<xf numFmtId="164" fontId="7" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1"/>' + // 19 money big
+    '</cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>';
+
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
+  }
+  function colName(i) {
+    let s = '';
+    i += 1;
+    while (i > 0) { const m = (i - 1) % 26; s = String.fromCharCode(65 + m) + s; i = Math.floor((i - 1) / 26); }
+    return s;
+  }
+  function dateSerial(d) {
+    const [y, m, dd] = d.split('-').map(Number);
+    return Math.round((Date.UTC(y, m - 1, dd) - Date.UTC(1899, 11, 30)) / 86400000);
+  }
+
+  function sheetXml(sh) {
+    let rowsXml = '';
+    sh.rows.forEach((row, r) => {
+      if (!row) return;
+      let cells = '';
+      row.forEach((cell, c) => {
+        if (cell == null) return;
+        if (typeof cell !== 'object') cell = { v: cell };
+        const ref = colName(c) + (r + 1);
+        const s = STYLE[cell.s] || 0;
+        const sAttr = s ? ' s="' + s + '"' : '';
+        if (cell.v === '' || cell.v == null) { if (s) cells += '<c r="' + ref + '"' + sAttr + '/>'; return; }
+        if (cell.t === 'd') cells += '<c r="' + ref + '"' + sAttr + '><v>' + dateSerial(cell.v) + '</v></c>';
+        else if (cell.t === 'n' || typeof cell.v === 'number') cells += '<c r="' + ref + '"' + sAttr + '><v>' + cell.v + '</v></c>';
+        else cells += '<c r="' + ref + '"' + sAttr + ' t="inlineStr"><is><t xml:space="preserve">' + esc(cell.v) + '</t></is></c>';
+      });
+      const ht = sh.heights && sh.heights[r] ? ' ht="' + sh.heights[r] + '" customHeight="1"' : '';
+      rowsXml += '<row r="' + (r + 1) + '"' + ht + '>' + cells + '</row>';
+    });
+    const cols = sh.cols && sh.cols.length
+      ? '<cols>' + sh.cols.map((w, i) => '<col min="' + (i + 1) + '" max="' + (i + 1) + '" width="' + w + '" customWidth="1"/>').join('') + '</cols>' : '';
+    const merges = sh.merges && sh.merges.length
+      ? '<mergeCells count="' + sh.merges.length + '">' + sh.merges.map((m) => '<mergeCell ref="' + m + '"/>').join('') + '</mergeCells>' : '';
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+      '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>' +
+      '<sheetViews><sheetView workbookViewId="0" showGridLines="0"/></sheetViews>' +
+      '<sheetFormatPr defaultRowHeight="16"/>' + cols + '<sheetData>' + rowsXml + '</sheetData>' + merges +
+      '<pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" header="0.3" footer="0.3"/>' +
+      '<pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0"/></worksheet>';
+  }
+
+  function safeSheetName(name, used) {
+    let n = String(name).replace(/[\[\]:*?\/\\]/g, ' ').trim().slice(0, 31) || 'Sheet';
+    let base = n, i = 2;
+    while (used.has(n.toLowerCase())) { const suf = ' (' + i++ + ')'; n = base.slice(0, 31 - suf.length) + suf; }
+    used.add(n.toLowerCase());
+    return n;
+  }
+
+  // ---- zip (stored, no compression) ----
+  const CRC_TABLE = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; }
+    return t;
+  })();
+  function crc32(buf) {
+    let c = 0xffffffff;
+    for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  }
+  function zip(files) {
+    const enc = new TextEncoder();
+    const chunks = [], central = [];
+    let offset = 0;
+    files.forEach((f) => {
+      const name = enc.encode(f.name);
+      const data = typeof f.data === 'string' ? enc.encode(f.data) : f.data;
+      const crc = crc32(data);
+      const h = new DataView(new ArrayBuffer(30));
+      h.setUint32(0, 0x04034b50, true); h.setUint16(4, 20, true); h.setUint16(6, 0x0800, true); h.setUint16(8, 0, true);
+      h.setUint16(10, 0, true); h.setUint16(12, 0x21, true); h.setUint32(14, crc, true);
+      h.setUint32(18, data.length, true); h.setUint32(22, data.length, true); h.setUint16(26, name.length, true); h.setUint16(28, 0, true);
+      chunks.push(new Uint8Array(h.buffer), name, data);
+      const c = new DataView(new ArrayBuffer(46));
+      c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true); c.setUint16(8, 0x0800, true);
+      c.setUint16(10, 0, true); c.setUint16(12, 0, true); c.setUint16(14, 0x21, true); c.setUint32(16, crc, true);
+      c.setUint32(20, data.length, true); c.setUint32(24, data.length, true); c.setUint16(28, name.length, true);
+      c.setUint32(42, offset, true);
+      central.push(new Uint8Array(c.buffer), name);
+      offset += 30 + name.length + data.length;
+    });
+    const cdSize = central.reduce((a, b) => a + b.length, 0);
+    const e = new DataView(new ArrayBuffer(22));
+    e.setUint32(0, 0x06054b50, true); e.setUint16(8, files.length, true); e.setUint16(10, files.length, true);
+    e.setUint32(12, cdSize, true); e.setUint32(16, offset, true);
+    const all = chunks.concat(central, [new Uint8Array(e.buffer)]);
+    const out = new Uint8Array(all.reduce((a, b) => a + b.length, 0));
+    let p = 0;
+    all.forEach((b) => { out.set(b, p); p += b.length; });
+    return out;
+  }
+
+  // sheets: [{ name, rows, cols, merges, heights }] -> Uint8Array of an .xlsx file
+  function build(sheets, title) {
+    const used = new Set();
+    const named = sheets.map((s) => Object.assign({}, s, { name: safeSheetName(s.name, used) }));
+    const files = [
+      { name: '[Content_Types].xml', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>' +
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+        '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
+        '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>' +
+        named.map((s, i) => '<Override PartName="/xl/worksheets/sheet' + (i + 1) + '.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>').join('') + '</Types>' },
+      { name: '_rels/.rels', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
+        '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>' },
+      { name: 'docProps/core.xml', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/">' +
+        '<dc:title>' + esc(title || 'Statement') + '</dc:title><dc:creator>Money Jars</dc:creator></cp:coreProperties>' },
+      { name: 'xl/workbook.xml', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>' +
+        named.map((s, i) => '<sheet name="' + esc(s.name) + '" sheetId="' + (i + 1) + '" r:id="rId' + (i + 1) + '"/>').join('') + '</sheets></workbook>' },
+      { name: 'xl/_rels/workbook.xml.rels', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        named.map((s, i) => '<Relationship Id="rId' + (i + 1) + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet' + (i + 1) + '.xml"/>').join('') +
+        '<Relationship Id="rId' + (named.length + 1) + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>' },
+      { name: 'xl/styles.xml', data: STYLES_XML },
+    ];
+    named.forEach((s, i) => files.push({ name: 'xl/worksheets/sheet' + (i + 1) + '.xml', data: sheetXml(s) }));
+    return zip(files);
+  }
+
+  return { build, colName, STYLE };
+});
+</script>
+<script>
+/* Builds bank-style statement workbooks from Money Jars data. Needs core.js and xlsx.js. */
+(function (root, factory) {
+  const isNode = typeof module === 'object' && module.exports;
+  const api = factory(isNode ? require('./core.js') : root.Core, isNode ? require('./xlsx.js') : root.XLSXLite);
+  if (isNode) module.exports = api;
+  else root.Statement = api;
+})(typeof self !== 'undefined' ? self : this, function (C, X) {
+  'use strict';
+  const B = C.BUCKETS;
+  const W = 7; // columns per account block, including a spacer
+
+  function niceDate(d) {
+    if (!d) return '';
+    const [y, m, dd] = d.split('-').map(Number);
+    return ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][m - 1] + ' ' + dd + ', ' + y;
+  }
+  function periodText(from, to) {
+    if (!from && !to) return 'All activity';
+    if (!from) return 'Everything through ' + niceDate(to);
+    return niceDate(from) + ' to ' + niceDate(to || C.todayStr());
+  }
+  const $ = (c) => (c ? c / 100 : '');
+  const money = (c) => c / 100;
+
+  function kidSheet(state, kid, opts) {
+    const s = state.settings;
+    const bank = s.bankName || ('Bank of ' + (s.parentName || 'Mom & Dad'));
+    const rows = [], merges = [], heights = {};
+    const put = (r, c, cell) => { (rows[r] = rows[r] || [])[c] = cell; };
+    const merge = (r, c1, c2) => merges.push(X.colName(c1) + (r + 1) + ':' + X.colName(c2) + (r + 1));
+    let maxRow = 0;
+    B.forEach((b, i) => {
+      const o = i * W;
+      const st = C.statementRows(state, kid.id, b, opts.from, opts.to);
+      const label = C.BUCKET_INFO[b].label;
+      put(0, o, { v: 'STATEMENT OF ACCOUNT', s: 'title' }); merge(0, o, o + 5);
+      put(1, o, { v: kid.name, s: 'bold' }); merge(1, o, o + 5);
+      put(2, o, { v: bank + '  ·  Statement date ' + niceDate(C.todayStr()), s: 'muted' }); merge(2, o, o + 5);
+      put(3, o, { v: 'Statement period: ' + periodText(opts.from, opts.to), s: 'muted' }); merge(3, o, o + 5);
+      for (let c = 0; c < 6; c++) put(5, o + c, { v: c ? '' : label.toUpperCase() + ' ACCOUNT', s: b });
+      merge(5, o, o + 5); heights[5] = 22;
+      const sum = [
+        ['Opening balance', st.opening, 'money'],
+        ['+ Deposits', st.totals.deposit, 'money'],
+        ['+ Parent bonus', st.totals.bonus, 'money'],
+        ['− Withdrawals', st.totals.withdrawal, 'money'],
+      ];
+      sum.forEach(([l, v], j) => { put(6 + j, o, { v: l, s: 'label' }); put(6 + j, o + 5, { v: money(v), s: 'money' }); });
+      put(10, o, { v: 'Closing balance', s: 'totalLabel' });
+      for (let c = 1; c < 5; c++) put(10, o + c, { v: '', s: 'totalLabel' });
+      put(10, o + 5, { v: money(st.closing), s: 'totalMoney' });
+      put(11, o, { v: '   ' + kid.name + "'s own money", s: 'muted' }); put(11, o + 5, { v: money(st.closingKid), s: 'money' });
+      put(12, o, { v: '   Bonus money from ' + (s.parentName || 'parents'), s: 'muted' }); put(12, o + 5, { v: money(st.closingParent), s: 'money' });
+      const head = ['DATE', 'DESCRIPTION', 'WITHDRAWALS', 'DEPOSITS', 'PARENT BONUS', 'BALANCE'];
+      head.forEach((h, c) => put(14, o + c, { v: h, s: c >= 2 ? 'headerRight' : 'header' }));
+      heights[14] = 20;
+      let r = 15;
+      put(r, o, opts.from ? { v: opts.from, t: 'd', s: 'date' } : { v: '', s: 'text' });
+      put(r, o + 1, { v: 'Balance forward', s: 'text' });
+      put(r, o + 2, { v: '', s: 'money' }); put(r, o + 3, { v: '', s: 'money' }); put(r, o + 4, { v: '', s: 'money' });
+      put(r, o + 5, { v: money(st.opening), s: 'money' });
+      st.rows.forEach((x) => {
+        r++;
+        put(r, o, { v: x.date, t: 'd', s: 'date' });
+        put(r, o + 1, { v: x.description, s: 'text' });
+        put(r, o + 2, { v: $(x.withdrawal), s: 'moneyOut' });
+        put(r, o + 3, { v: $(x.deposit), s: 'money' });
+        put(r, o + 4, { v: $(x.bonus), s: 'moneyBonus' });
+        put(r, o + 5, { v: money(x.balance), s: 'money' });
+      });
+      r++;
+      put(r, o, { v: 'Totals', s: 'totalLabel' }); put(r, o + 1, { v: '', s: 'totalLabel' });
+      put(r, o + 2, { v: money(st.totals.withdrawal), s: 'totalMoney' });
+      put(r, o + 3, { v: money(st.totals.deposit), s: 'totalMoney' });
+      put(r, o + 4, { v: money(st.totals.bonus), s: 'totalMoney' });
+      put(r, o + 5, { v: money(st.closing), s: 'totalMoney' });
+      maxRow = Math.max(maxRow, r);
+    });
+    const cols = [];
+    B.forEach(() => cols.push(13, 34, 13, 13, 14, 14, 3));
+    for (let r = 0; r <= maxRow; r++) rows[r] = rows[r] || [];
+    return { name: kid.name, rows, cols, merges, heights: Object.keys(heights).map(Number).reduce((a, k) => { a[k] = heights[k]; return a; }, []) };
+  }
+
+  function summarySheet(state, kids, opts) {
+    const s = state.settings;
+    const bank = s.bankName || ('Bank of ' + (s.parentName || 'Mom & Dad'));
+    const rows = [
+      [{ v: 'MONEY JARS SUMMARY', s: 'title' }],
+      [{ v: bank + '  ·  Statement date ' + niceDate(C.todayStr()), s: 'muted' }],
+      [{ v: 'Statement period: ' + periodText(opts.from, opts.to), s: 'muted' }],
+      [],
+      [{ v: 'Closing balances', s: 'bold' }],
+    ];
+    const head = ['KID', 'SPEND', 'SAVE', 'INVEST', 'GIFT', 'TOTAL', "KID'S OWN MONEY", 'PARENT BONUS'];
+    rows.push(head.map((h, i) => ({ v: h, s: i ? 'headerRight' : 'header' })));
+    const tot = new Array(7).fill(0);
+    kids.forEach((k) => {
+      const per = B.map((b) => C.statementRows(state, k.id, b, opts.from, opts.to));
+      const vals = per.map((p) => p.closing);
+      const total = vals.reduce((a, v) => a + v, 0);
+      const kidOwn = per.reduce((a, p) => a + p.closingKid, 0);
+      const par = per.reduce((a, p) => a + p.closingParent, 0);
+      const all = vals.concat([total, kidOwn, par]);
+      all.forEach((v, i) => (tot[i] += v));
+      rows.push([{ v: k.name, s: 'text' }].concat(all.map((v) => ({ v: money(v), s: 'money' }))));
+    });
+    if (kids.length > 1) rows.push([{ v: 'All kids', s: 'totalLabel' }].concat(tot.map((v) => ({ v: money(v), s: 'totalMoney' }))));
+    rows.push([], [{ v: 'Activity this period (moves between jars left out)', s: 'bold' }]);
+    rows.push(['KID', 'DEPOSITS', 'PARENT BONUS', 'WITHDRAWALS'].map((h, i) => ({ v: h, s: i ? 'headerRight' : 'header' })));
+    kids.forEach((k) => {
+      let d = 0, bo = 0, w = 0;
+      B.forEach((b) => C.statementRows(state, k.id, b, opts.from, opts.to).rows.forEach((x) => {
+        if (x.type === 'transfer') return;
+        d += x.deposit; bo += x.bonus; w += x.withdrawal;
+      }));
+      rows.push([{ v: k.name, s: 'text' }, { v: money(d), s: 'money' }, { v: money(bo), s: 'moneyBonus' }, { v: money(w), s: 'moneyOut' }]);
+    });
+    return { name: 'Summary', rows, cols: [24, 14, 14, 14, 14, 14, 18, 15], merges: [] };
+  }
+
+  // opts: { kidId: 'all' | id, from: 'YYYY-MM-DD' | '', to: 'YYYY-MM-DD' | '' }
+  function workbook(state, opts) {
+    opts = opts || {};
+    const kids = state.kids.filter((k) => !opts.kidId || opts.kidId === 'all' || k.id === opts.kidId);
+    const sheets = [summarySheet(state, kids, opts)].concat(kids.map((k) => kidSheet(state, k, opts)));
+    return X.build(sheets, 'Money Jars statement');
+  }
+
+  return { workbook, periodText };
 });
 </script>
 <script>
@@ -752,6 +1149,16 @@ dialog#sheet::backdrop { background: rgba(22,19,30,.5); }
     t.classList.add('show');
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => t.classList.remove('show'), 3200);
+  }
+  // On phones, open the share sheet (Save to Files, Drive, email). Elsewhere, download.
+  async function deliver(name, data, type) {
+    const file = new File([data], name, { type });
+    const phone = matchMedia('(pointer: coarse)').matches;
+    if (phone && navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file], title: name }); return; }
+      catch (e) { if (e.name === 'AbortError') return; }
+    }
+    download(name, data, type);
   }
   function download(name, text, type) {
     const blob = new Blob([text], { type });
@@ -971,7 +1378,7 @@ dialog#sheet::backdrop { background: rgba(22,19,30,.5); }
           <option value="all"${sel === 'all' ? ' selected' : ''}>Everyone</option>
           ${kids.map((k) => `<option value="${k.id}"${sel === k.id ? ' selected' : ''}>${esc(k.emoji + ' ' + k.name)}</option>`).join('')}
         </select>
-        <button class="btn" data-action="export-csv">⬇️ Export to spreadsheet</button></div></div>
+        <button class="btn primary" data-action="statements">📄 Statements</button></div></div>
       <div class="card"><h2>Totals</h2><div class="scroll-x"><table class="t">
         <thead><tr><th>What</th><th class="r">Kid money</th><th class="r">${esc(pName())}</th><th class="r">Total</th></tr></thead>
         <tbody>${body || '<tr><td colspan="4" class="muted">No entries yet.</td></tr>'}</tbody>
@@ -1000,7 +1407,10 @@ dialog#sheet::backdrop { background: rgba(22,19,30,.5); }
           <p class="muted small" style="margin:0">Percent added once when money goes in. 100 means $1 for every $1.</p>
           <div class="grid4">${B.map((b) => `<label class="f">${BI[b].emoji} ${BI[b].label} %${num('match_' + b, s.match[b], 'min="0"')}</label>`).join('')}</div>
           <label class="check"><input type="checkbox" name="matchEarned" ${s.matchEarned ? 'checked' : ''}> Match earned money too, not just gifts</label>
-          <label class="f">What kids call you${'<input name="parentName" value="' + esc(s.parentName) + '">'}</label></div>
+          <div class="grid2">
+            <label class="f">What kids call you<input name="parentName" value="${esc(s.parentName)}"></label>
+            <label class="f">Bank name on statements<input name="bankName" value="${esc(s.bankName || '')}" placeholder="Bank of ${esc(s.parentName || 'Mom & Dad')}"></label>
+          </div></div>
         <div class="card stack"><h2>🐷 Save rules</h2>
           <div class="grid2">
             <label class="f">Yearly interest %${num('saveAPR', s.saveAPR, 'min="0"')}</label>
@@ -1061,6 +1471,53 @@ dialog#sheet::backdrop { background: rgba(22,19,30,.5); }
       </details></fieldset>`;
   }
 
+  // ---------- statements ----------
+  function periodRange(key) {
+    const t = C.todayStr();
+    const [y, m] = t.split('-').map(Number);
+    const p2 = (n) => String(n).padStart(2, '0');
+    const last = (yy, mm) => yy + '-' + p2(mm) + '-' + p2(new Date(yy, mm, 0).getDate());
+    if (key === 'this-month') return { from: y + '-' + p2(m) + '-01', to: t };
+    if (key === 'last-month') { const ly = m === 1 ? y - 1 : y, lm = m === 1 ? 12 : m - 1; return { from: ly + '-' + p2(lm) + '-01', to: last(ly, lm) }; }
+    if (key === 'this-year') return { from: y + '-01-01', to: t };
+    if (key === 'last-year') return { from: (y - 1) + '-01-01', to: (y - 1) + '-12-31' };
+    return { from: '', to: t };
+  }
+  function statementSheet() {
+    const kids = st().kids;
+    if (!kids.length) { toast('Add a kid first'); return; }
+    openSheet('📄 Statements', `
+      <form class="stack">
+        <p class="muted" style="margin:0">Bank-style statements with each jar as its own account: withdrawals, deposits, parent bonus and running balance.</p>
+        <label class="f">Who<select name="kid"><option value="all">Everyone</option>${kids.map((k) => `<option value="${k.id}"${k.id === S.histKid ? ' selected' : ''}>${esc(k.emoji + ' ' + k.name)}</option>`).join('')}</select></label>
+        <label class="f">Statement period<select name="period">
+          <option value="this-month">This month</option><option value="last-month">Last month</option>
+          <option value="this-year">This year</option><option value="last-year">Last year</option>
+          <option value="all" selected>All time</option><option value="custom">Custom dates</option></select></label>
+        <div class="grid2" id="customDates" hidden>
+          <label class="f">From<input type="date" name="from"></label>
+          <label class="f">To<input type="date" name="to" value="${C.todayStr()}"></label>
+        </div>
+        <div class="msgs"></div>
+        <button type="submit" class="btn primary block" value="xlsx">📗 Excel statement (.xlsx)</button>
+        <button type="submit" class="btn block" value="csv">CSV file</button>
+        <p class="muted small" style="margin:0">Excel files open in Excel, Google Sheets and Numbers. Use CSV to import into other tools.</p>
+      </form>`, (form) => {
+      form.addEventListener('change', () => { $('#customDates', form).hidden = form.period.value !== 'custom'; });
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const fmtType = (e.submitter && e.submitter.value) || 'xlsx';
+        const range = form.period.value === 'custom' ? { from: form.from.value, to: form.to.value || C.todayStr() } : periodRange(form.period.value);
+        if (range.from && range.to && range.from > range.to) { $('.msgs', form).innerHTML = '<div class="msg err">The From date is after the To date.</div>'; return; }
+        const opts = { kidId: form.kid.value, from: range.from, to: range.to };
+        const who = opts.kidId === 'all' ? 'All kids' : (kids.find((k) => k.id === opts.kidId) || {}).name;
+        const base = 'Money Jars statement - ' + who + ' - ' + (range.from ? range.from + ' to ' : 'through ') + range.to;
+        if (fmtType === 'csv') deliver(base + '.csv', C.statementCSV(st(), opts), 'text/csv');
+        else deliver(base + '.xlsx', window.Statement.workbook(st(), opts), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      });
+    });
+  }
+
   // ---------- start fresh ----------
   function undoInfo() {
     try { const raw = localStorage.getItem(UNDO_KEY); return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
@@ -1110,7 +1567,7 @@ dialog#sheet::backdrop { background: rgba(22,19,30,.5); }
     if (ms.some((x) => !(x > 0))) errs.push('Milestones must be positive numbers.');
     if (errs.length) { $('.msgs', form).innerHTML = errs.map((e) => `<div class="msg err">${esc(e)}</div>`).join(''); return; }
     Object.assign(s, {
-      giftSplit: split, match, matchEarned: f.matchEarned.checked, parentName: f.parentName.value.trim() || 'Mom & Dad',
+      giftSplit: split, match, matchEarned: f.matchEarned.checked, parentName: f.parentName.value.trim() || 'Mom & Dad', bankName: f.bankName.value.trim(),
       saveAPR: n('saveAPR'), saveMaxWithdrawPct: n('saveMaxWithdrawPct'), saveWindow: f.saveWindow.value,
       saveWithdrawalsPerWindow: Math.max(1, Math.round(n('saveWithdrawalsPerWindow'))),
       saveMilestones: ms.sort((a, b) => a - b), autoInterest: f.autoInterest.checked,
@@ -1594,7 +2051,7 @@ dialog#sheet::backdrop { background: rgba(22,19,30,.5); }
           persist(); closeSheet(); render(); toast('Entry deleted');
         });
         break;
-      case 'export-csv': download('money-jars-' + C.todayStr() + '.csv', C.toCSV(st()), 'text/csv'); break;
+      case 'statements': statementSheet(); break;
       case 'backup-now': backupNow(); break;
       case 'backup-download': download(backupName(), backupJSON(), 'application/json'); markBackedUp(); render(); toast('Backup downloaded ✓'); break;
       case 'backup-share': shareBackup(); break;

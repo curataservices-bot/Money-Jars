@@ -10,6 +10,8 @@ let html = read('index.html')
   .replace('href="icons/icon.svg"', 'href="' + icon + '"')
   .replace('<link rel="stylesheet" href="styles.css">', () => '<style>\n' + read('styles.css') + '</style>')
   .replace('<script src="core.js"></script>', () => '<script>\n' + read('core.js') + '</script>')
+  .replace('<script src="xlsx.js"></script>', () => '<script>\n' + read('xlsx.js') + '</script>')
+  .replace('<script src="statement.js"></script>', () => '<script>\n' + read('statement.js') + '</script>')
   .replace('<script src="app.js"></script>', () => '<script>\n' + read('app.js') + '</script>');
 fs.mkdirSync(path.join(root, 'dist'), { recursive: true });
 fs.writeFileSync(path.join(root, 'dist', 'money-jars.html'), html);

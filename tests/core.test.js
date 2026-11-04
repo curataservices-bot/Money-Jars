@@ -145,3 +145,36 @@ test('backup round trip and CSV', () => {
   const csv = C.toCSV(st);
   assert.match(csv, /"From ""Grandma"", with love"/);
 });
+
+test('statement rows separate withdrawals, deposits and parent bonus per account', () => {
+  const st = setup();
+  add(st, C.buildMoneyIn(st, { kidId: 'a', date: '2026-01-05', kind: 'gift', amount: 10000, note: 'Grandma' }));
+  add(st, C.buildOut(st, { kidId: 'a', date: '2026-02-01', bucket: 'gift', amount: 1000, note: 'Food bank' }));
+  add(st, C.buildTransfer(st, { kidId: 'a', date: '2026-02-02', from: 'spend', to: 'save', amount: 500 }));
+  const gift = C.statementRows(st, 'a', 'gift');
+  assert.deepEqual(gift.rows.map((r) => [r.description, r.deposit, r.bonus, r.withdrawal, r.balance]),
+    [['Gift: Grandma', 2500, 1250, 0, 3750], ['Food bank', 0, 0, 1000, 2750]]);
+  const save = C.statementRows(st, 'a', 'save');
+  assert.equal(save.rows[1].description, 'Moved from Spend');
+  assert.equal(save.rows[1].deposit, 500);
+  // period: opening balance carries earlier activity forward
+  const later = C.statementRows(st, 'a', 'gift', '2026-02-01', '2026-02-28');
+  assert.equal(later.opening, 3750);
+  assert.equal(later.rows.length, 1);
+  assert.equal(later.closing, 2750);
+  assert.equal(later.closingKid + later.closingParent, later.closing);
+  const csv = C.statementCSV(st, { from: '2026-02-01', to: '2026-02-28' });
+  assert.match(csv, /^Kid,Account,Date,Description,Withdrawal,Deposit,Parent bonus,Balance/);
+  assert.match(csv, /Ava,Gift,2026-02-01,Food bank,10\.00,,,27\.50/);
+});
+
+test('excel statement builds a valid zip with one sheet per kid plus summary', () => {
+  const S = require('../statement.js');
+  const st = setup();
+  add(st, C.buildMoneyIn(st, { kidId: 'a', date: '2026-01-05', kind: 'gift', amount: 10000 }));
+  const bytes = S.workbook(st, { kidId: 'all' });
+  assert.equal(bytes[0], 0x50); assert.equal(bytes[1], 0x4b); // "PK"
+  const text = Buffer.from(bytes).toString('utf8');
+  assert.match(text, /<sheet name="Summary"/);
+  assert.match(text, /<sheet name="Ava"/);
+});
